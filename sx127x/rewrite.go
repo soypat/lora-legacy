@@ -35,6 +35,7 @@ func NewDev(spi drivers.SPI, nssOrCS, reset machine.Pin) *Dev {
 
 // Init calls device initialization functions without resetting it.
 func (d *Dev) Init(cfg lora.Config) (err error) {
+	cfg.LoraTxPowerDBm = min(cfg.LoraTxPowerDBm, 20) // Set Max to 20dBm.
 	err = d.SetOpMode(OpSleep)
 	if err != nil {
 		return err
@@ -160,10 +161,14 @@ func (d *Dev) TxPacket(pkt []byte) (err error) {
 	d.Write8(SX127X_REG_PAYLOAD_LENGTH, uint8(len(pkt)))
 	d.Write8(SX127X_REG_FIFO_TX_BASE_ADDR, 0)
 	d.Write8(SX127X_REG_FIFO_ADDR_PTR, 0)
-	err = d.write(SX127X_REG_FIFO, pkt)
-	if err != nil {
-		return err
+	// err = d.write(SX127X_REG_FIFO, pkt) // Does not work.
+	for _, b := range pkt {
+		err = d.Write8(SX127X_REG_FIFO, b)
+		if err != nil {
+			return err
+		}
 	}
+
 	err = d.SetOpMode(OpTx)
 	if err != nil {
 		return err
@@ -187,7 +192,6 @@ func (d *Dev) RxPacket(buf []byte) (int, error) {
 		return 0, err
 	}
 	if pktSize == 0 {
-
 		return 0, io.EOF // No packets.
 	}
 	pktAddr, err := d.Read8(SX127X_REG_FIFO_RX_CURRENT_ADDR)
@@ -279,11 +283,16 @@ func (d *Dev) setSyncWord(syncWord uint8) error { return d.Write8(SX127X_REG_SYN
 func (d *Dev) setFrequency(freq uint32) error {
 	d.prevFreq = freq
 	var freqReg [3]byte
-	f64 := uint64(freq<<19) / 32000000
+	f64 := (uint64(freq) << 8) / 15625
 	freqReg[0] = byte(f64 >> 16)
 	freqReg[1] = byte(f64 >> 8)
 	freqReg[2] = byte(f64 >> 0)
-	return d.write(SX127X_REG_FRF_MSB, freqReg[:])
+	println("setF", freqReg[0], freqReg[1], freqReg[2], freq, f64)
+	d.Write8(SX127X_REG_FRF_MSB, freqReg[0])
+	d.Write8(SX127X_REG_FRF_MID, freqReg[1])
+	return d.Write8(SX127X_REG_FRF_LSB, freqReg[2])
+	//
+	// return d.write(SX127X_REG_FRF_MSB, freqReg[:])
 }
 
 // setBandwidth updates the bandwidth the LoRa module is using
@@ -332,6 +341,9 @@ func (d *Dev) setLowFrequencyModeOn(val bool) (err error) {
 	return err
 }
 
+// ReadConfig reads the configuration parameters from the device and returns
+// the corresponding lora.Config for the current device configuration.
+// Some lora.Config parameters are not set such as IQ, LDR, and Tx power.
 func (d *Dev) ReadConfig() (cfg lora.Config, continuousMode bool, err error) {
 	var buf [5]byte
 	err = d.read(SX127X_REG_MODEM_CONFIG_1, buf[:5])
@@ -344,21 +356,19 @@ func (d *Dev) ReadConfig() (cfg lora.Config, continuousMode bool, err error) {
 	cfg.HeaderType = cfg1 & 1
 	cfg2 := buf[1]
 	cfg.Spread = cfg2 >> 4
-	cfg.CRC = (cfg2 | 0x4) >> 2
-	continuousMode = cfg2|0x8 != 0
+	cfg.CRC = (cfg2 & 0x4) >> 2
+	continuousMode = cfg2&0x8 != 0
 	cfg.PreambleLength = binary.BigEndian.Uint16(buf[3:])
-
-	err = d.read(SX127X_REG_FRF_MSB, buf[:3])
+	// Read sync word.
+	sync, err := d.Read8(SX127X_REG_SYNC_WORD)
 	if err != nil {
 		return cfg, continuousMode, err
 	}
+	cfg.SyncWord = uint16(sync)
+	// Read Frequency.
+	err = d.read(SX127X_REG_FRF_MSB, buf[:3])
 	freq := uint64(buf[0])<<16 | uint64(buf[1])<<8 | uint64(buf[2])
-	freq = (freq >> 19) * 320000
-	cfg.Freq = uint32(freq)
-	// freq := uint64(fHz<<19) / 32000000
-	// freqReg[0] = byte(freq >> 16)
-	// freqReg[1] = byte(freq >> 8)
-	// freqReg[2] = byte(freq >> 0)
+	cfg.Freq = uint32((freq * 15625) >> 8)
 	return cfg, continuousMode, nil
 }
 
@@ -471,7 +481,8 @@ func (d *Dev) setOCP(mA uint8) error {
 func (d *Dev) setPreambleLength(pLen uint16) error {
 	var buf [2]byte
 	binary.BigEndian.PutUint16(buf[:], pLen)
-	return d.write(SX127X_REG_PREAMBLE_MSB, buf[:])
+	d.Write8(SX127X_REG_PREAMBLE_MSB, buf[0])
+	return d.Write8(SX127X_REG_PREAMBLE_LSB, buf[1])
 }
 
 func (d *Dev) OpMode() OpMode {
@@ -630,7 +641,8 @@ func (d *Dev) read(addr uint8, buf []byte) error {
 	return err
 }
 
-func (d *Dev) write(addr uint8, buf []byte) error {
+// This function does not work for some reason??
+func (d *Dev) _DONOTUSE_write(addr uint8, buf []byte) error {
 	if len(buf) <= 1 {
 		return io.ErrShortBuffer
 	}
@@ -683,7 +695,7 @@ func (d *Dev) enable(b bool) {
 	d.nss.Set(!b)
 }
 
-func min[T ~int | ~int64 | ~uint8](a, b T) T {
+func min[T ~int | ~int64 | ~uint8 | ~int8](a, b T) T {
 	if a < b {
 		return a
 	}

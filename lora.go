@@ -148,6 +148,45 @@ func max[T ~int | ~int64 | ~uint8](a, b T) T {
 	return b
 }
 
+// CountryConfig see https://www.thethingsnetwork.org/country/
+func CountryConfig(code string, isPublic bool) (cfg Config, maxPayload uint16, err error) {
+	var (
+		freq     uint32
+		spread   uint8
+		maxTxPow int8
+	)
+	// Set Default values.
+	cfg.CodingRate = CodingRate4_7
+	cfg.HeaderType = HeaderExplicit
+	cfg.PreambleLength = 12
+	cfg.IQ = IQStandard
+	cfg.CRC = CRCOn
+	cfg.SyncWord = SyncPrivate
+	if isPublic {
+		cfg.SyncWord = SyncPublic
+	}
+	cfg.Bandwidth = Bandwidth125_0
+	// https://www.iban.com/country-codes
+	switch string(code[:]) {
+	case "ar", "us":
+		freq = MHz916_8 + (MHz923_3-MHz916_8)/4 // Range 916.8Mhz to 923.3MHz.
+		spread = SpreadingFactor9
+		maxTxPow = 30
+		maxPayload = 242
+	case "de", "es", "fr", "be", "eu":
+		freq = MHz868_1 + (MHz868_5-MHz868_1)/4 // Range 868.1Mhz to 868.5MHz.
+		spread = SpreadingFactor9
+		maxTxPow = 20
+		maxPayload = 242
+	default:
+		return cfg, 0, errors.New("country config not added yet")
+	}
+	cfg.LoraTxPowerDBm = maxTxPow
+	cfg.Freq = freq
+	cfg.Spread = spread
+	return cfg, maxPayload, nil
+}
+
 /*
 const (
 

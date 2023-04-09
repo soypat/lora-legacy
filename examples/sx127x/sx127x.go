@@ -31,6 +31,7 @@ var (
 	SX127X_PIN_TX  = machine.GP3
 	SX127X_PIN_RX  = machine.GP4
 	SX127X_PIN_CS  = machine.GP5
+	loraConf, _, _ = lora.CountryConfig("ar", false)
 )
 
 func main() {
@@ -62,18 +63,7 @@ func main() {
 	cfg, cont, err := dev.ReadConfig()
 
 	// Prepare for Lora Operation
-	loraConf := lora.Config{
-		Freq:           lora.MHz868_1,
-		Bandwidth:      lora.Bandwidth125_0,
-		Spread:         lora.SpreadingFactor9,
-		CodingRate:     lora.CodingRate4_7,
-		HeaderType:     lora.HeaderExplicit,
-		PreambleLength: 12,
-		IQ:             lora.IQStandard,
-		CRC:            lora.CRCOn,
-		SyncWord:       lora.SyncPrivate,
-		LoraTxPowerDBm: 20,
-	}
+
 	fmt.Println("time on air 10:", loraConf.TimeOnAir(10), " ToA255:", loraConf.TimeOnAir(255))
 	fmt.Printf("%v\n%+v err=%v\n\nwant=%+v\n", cont, cfg, err, loraConf)
 
@@ -88,6 +78,10 @@ func main() {
 	delay := loraConf.TimeOnAir(len(txBuf))
 	delayStr := delay.String()
 	for {
+		for dev.CheckConnection() != nil {
+			println("check SPI connection!")
+			time.Sleep(time.Second)
+		}
 		println("listening...")
 		err := dev.ListenAndDo(doRx5Seconds)
 		if err != nil {
