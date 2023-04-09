@@ -33,12 +33,12 @@ func NewDev(spi drivers.SPI, nssOrCS, reset machine.Pin) *Dev {
 	return d
 }
 
+// Init calls device initialization functions without resetting it.
 func (d *Dev) Init(cfg lora.Config) (err error) {
-	err = d.sleep()
+	err = d.SetOpMode(OpSleep)
 	if err != nil {
 		return err
 	}
-	time.Sleep(15 * time.Millisecond)
 
 	err = d.entryLoRa()
 	if err != nil {
@@ -46,43 +46,43 @@ func (d *Dev) Init(cfg lora.Config) (err error) {
 	}
 	// d.SetHopPeriod(0)
 	// d.SetLowFrequencyModeOn(false) // High freq mode.
-	err = d.SetFrequency(cfg.Freq)
+	err = d.setFrequency(cfg.Freq)
 	if err != nil {
 		return err
 	}
-	err = d.SetSyncWord(uint8(cfg.SyncWord))
+	err = d.setSyncWord(uint8(cfg.SyncWord))
 	if err != nil {
 		return err
 	}
-	err = d.SetBandwidth(cfg.Bandwidth)
+	err = d.setBandwidth(cfg.Bandwidth)
 	if err != nil {
 		return err
 	}
-	err = d.SetSpreadingFactor(cfg.Spread)
+	err = d.setSpreadingFactor(cfg.Spread)
 	if err != nil {
 		return err
 	}
-	err = d.SetIqMode(cfg.IQ)
+	err = d.setIqMode(cfg.IQ)
 	if err != nil {
 		return err
 	}
-	err = d.SetCodingRate(cfg.CodingRate)
+	err = d.setCodingRate(cfg.CodingRate)
 	if err != nil {
 		return err
 	}
-	err = d.EnableCRC(cfg.CRC != 0)
+	err = d.enableCRC(cfg.CRC != 0)
 	if err != nil {
 		return err
 	}
-	err = d.SetTxPower(cfg.LoraTxPowerDBm)
+	err = d.setTxPower(cfg.LoraTxPowerDBm)
 	if err != nil {
 		return err
 	}
-	err = d.SetHeaderType(cfg.HeaderType)
+	err = d.setHeaderType(cfg.HeaderType)
 	if err != nil {
 		return err
 	}
-	err = d.SetAutoAGC(SX127X_AGC_AUTO_ON)
+	err = d.setAutoAGC(SX127X_AGC_AUTO_ON)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (d *Dev) Init(cfg lora.Config) (err error) {
 	if err != nil {
 		return err
 	}
-	err = d.SetPreambleLength(cfg.PreambleLength)
+	err = d.setPreambleLength(cfg.PreambleLength)
 	if err != nil {
 		return err
 	}
@@ -103,8 +103,8 @@ func (d *Dev) Init(cfg lora.Config) (err error) {
 	if err != nil {
 		return err
 	}
-	d.SetHopPeriod(0)
-	d.SetLowFrequencyModeOn(false)
+	d.setHopPeriod(0)
+	d.setLowFrequencyModeOn(false)
 	// set PA ramp-up time 50 uSec
 	reg, err := d.Read8(SX127X_REG_PA_RAMP)
 	if err != nil {
@@ -114,17 +114,44 @@ func (d *Dev) Init(cfg lora.Config) (err error) {
 	// Set Low Noise Amplifier to MAX
 	d.Write8(SX127X_REG_LNA, SX127X_LNA_MAX_GAIN)
 	// Wake back up or Tx and Rx will not work.
-	err = d.SetOpMode(SX127X_OPMODE_STANDBY)
+	err = d.SetOpMode(OpStandby)
 	return err
 }
 
-func (d *Dev) TxPacket(pkt []byte) (err error) {
-	if len(pkt) > 255 {
-		return errors.New("packet too large to transmit. limit is 255")
+func TimeOnAir(cfg lora.Config, packetLength uint8) time.Duration {
+	crc := int64(max(cfg.CRC, 1))
+	ih := int64(max(cfg.HeaderType, 1))
+	ldr := int64(max(cfg.LDR, 1))
+	cr := int64(cfg.CodingRate)
+	spread := int64(cfg.Spread)
+	// Page 31 SX1276IMLTRT SEMTECH | Alldatasheet.
+	Npayload := 8*int64(packetLength) - 4*spread + 28 + 16*crc - 20*ih
+	div := 4 * (spread - 2*ldr)
+	// Apply Ceil and max with minimal branching.
+	if Npayload < 0 || div <= 0 {
+		Npayload = 0
+	} else if Npayload%div == 0 {
+		Npayload /= div
+		Npayload *= (cr + 4)
+	} else {
+		Npayload /= div
+		Npayload++
+		Npayload *= (cr + 4)
 	}
-	if d.IsTransmitting() {
+	Npayload += 8 + int64(cfg.PreambleLength) + 5 // Says 4.25 in manual but we round up.
+	// Calculate LoRa Transmission Parameter Relationship page 28.
+	Ts_us := 1000_000 * (int64(1) << cfg.Spread) / int64(lora.BandwidthToHertz(cfg.Bandwidth))
+	return time.Microsecond * (time.Duration(Npayload * Ts_us))
+}
+
+func (d *Dev) TxPacket(pkt []byte) (err error) {
+	switch {
+	case len(pkt) > 255:
+		return errors.New("packet too large to transmit. limit is 255")
+	case d.OpMode() == OpTx:
 		return errors.New("is currently transmitting packet")
 	}
+
 	err = d.clrLoRaIrq()
 	if err != nil {
 		return err
@@ -137,7 +164,7 @@ func (d *Dev) TxPacket(pkt []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	err = d.SetOpMode(SX127X_OPMODE_TX)
+	err = d.SetOpMode(OpTx)
 	if err != nil {
 		return err
 	}
@@ -148,9 +175,9 @@ func (d *Dev) RxPacket(buf []byte) (int, error) {
 	switch {
 	case d.prevFreq == 0:
 		return 0, errors.New("frequency not set- was device initialized?")
-	case d.dio0 == machine.NoPin:
-		return 0, errors.New("no DIO0 pin set")
-	case d.IsTransmitting():
+	// case d.dio0 == machine.NoPin:
+	// 	return 0, errors.New("no DIO0 pin set")
+	case d.OpMode() == OpTx:
 		return 0, errors.New("currently transmitting")
 		// case d.dio0.Get() == false:
 		// 	return 0, io.EOF// Not ok to receive?
@@ -185,20 +212,20 @@ func (d *Dev) RxPacket(buf []byte) (int, error) {
 // that change the opmode during the duration of the callback to prevent device
 // from malfunctioning or failing to listen to a packet. After the callback
 // finishes execution the device's state is returned to standby.
-func (d *Dev) ListenAndDo(fn func()) error {
+func (d *Dev) ListenAndDo(fn func(*Dev)) error {
 	if fn == nil {
 		return errors.New("nil callback")
 	}
-	err := d.SetOpMode(SX127X_OPMODE_RX)
+	err := d.SetOpMode(OpRx)
 	if err != nil {
 		return err
 	}
-	fn()
-	return d.SetOpMode(SX127X_OPMODE_STANDBY)
+	fn(d)
+	return d.SetOpMode(OpStandby)
 }
 
 // SetCrc Enable CRC generation and check on payload.
-func (d *Dev) EnableCRC(enable bool) error {
+func (d *Dev) enableCRC(enable bool) error {
 	reg, err := d.Read8(SX127X_REG_MODEM_CONFIG_2)
 	if err != nil {
 		return err
@@ -211,13 +238,13 @@ func (d *Dev) EnableCRC(enable bool) error {
 	return err
 }
 
-// SetTxPower sets the transmitter output (with paBoost ON)
-func (d *Dev) SetTxPower(txPower int8) error {
+// setTxPower sets the transmitter output (with paBoost ON)
+func (d *Dev) setTxPower(txPower int8) error {
 	return d.setTxPowerWithPaBoost(txPower, true)
 }
 
 // SetIQMode Sets I/Q polarity configuration
-func (d *Dev) SetIqMode(val uint8) (err error) {
+func (d *Dev) setIqMode(val uint8) (err error) {
 	//Default IQ is Standard normal values.
 	var (
 		iq1 uint8 = 0x27
@@ -238,18 +265,18 @@ func (d *Dev) SetIqMode(val uint8) (err error) {
 // SetPublicNetwork changes Sync Word to match network type.
 func (d *Dev) SetPublicNetwork(enabled bool) (err error) {
 	if enabled {
-		err = d.SetSyncWord(SX127X_LORA_MAC_PUBLIC_SYNCWORD)
+		err = d.setSyncWord(SX127X_LORA_MAC_PUBLIC_SYNCWORD)
 	} else {
-		err = d.SetSyncWord(SX127X_LORA_MAC_PRIVATE_SYNCWORD)
+		err = d.setSyncWord(SX127X_LORA_MAC_PRIVATE_SYNCWORD)
 	}
 	return err
 }
 
-// SetSyncWord defines the 8bit sync word.
-func (d *Dev) SetSyncWord(syncWord uint8) error { return d.Write8(SX127X_REG_SYNC_WORD, syncWord) }
+// setSyncWord defines the 8bit sync word.
+func (d *Dev) setSyncWord(syncWord uint8) error { return d.Write8(SX127X_REG_SYNC_WORD, syncWord) }
 
-// SetFrequency sets the LoRa frequency parameter.
-func (d *Dev) SetFrequency(freq uint32) error {
+// setFrequency sets the LoRa frequency parameter.
+func (d *Dev) setFrequency(freq uint32) error {
 	d.prevFreq = freq
 	var freqReg [3]byte
 	f64 := uint64(freq<<19) / 32000000
@@ -259,8 +286,8 @@ func (d *Dev) SetFrequency(freq uint32) error {
 	return d.write(SX127X_REG_FRF_MSB, freqReg[:])
 }
 
-// SetBandwidth updates the bandwidth the LoRa module is using
-func (d *Dev) SetBandwidth(bw uint8) error {
+// setBandwidth updates the bandwidth the LoRa module is using
+func (d *Dev) setBandwidth(bw uint8) error {
 	val, err := d.Read8(SX127X_REG_MODEM_CONFIG_1)
 	if err != nil {
 		return err
@@ -268,8 +295,8 @@ func (d *Dev) SetBandwidth(bw uint8) error {
 	return d.Write8(SX127X_REG_MODEM_CONFIG_1, (val&0x0f)|(bw<<4))
 }
 
-// SetCodingRate updates the coding rate the LoRa module is using.
-func (d *Dev) SetCodingRate(cr uint8) error {
+// setCodingRate updates the coding rate the LoRa module is using.
+func (d *Dev) setCodingRate(cr uint8) error {
 	val, err := d.Read8(SX127X_REG_MODEM_CONFIG_1)
 	if err != nil {
 		return err
@@ -277,8 +304,8 @@ func (d *Dev) SetCodingRate(cr uint8) error {
 	return d.Write8(SX127X_REG_MODEM_CONFIG_1, (0xf1&val)|(cr<<1))
 }
 
-// SetAutoAGC enables Automatic Gain Control.
-func (d *Dev) SetAutoAGC(val uint8) error {
+// setAutoAGC enables Automatic Gain Control.
+func (d *Dev) setAutoAGC(val uint8) error {
 	reg, err := d.Read8(SX127X_REG_MODEM_CONFIG_3)
 	if err != nil {
 		return err
@@ -291,8 +318,8 @@ func (d *Dev) SetAutoAGC(val uint8) error {
 	return err
 }
 
-// SetLowFrequencyModeOn enables Low Data Rate Optimization
-func (d *Dev) SetLowFrequencyModeOn(val bool) (err error) {
+// setLowFrequencyModeOn enables Low Data Rate Optimization
+func (d *Dev) setLowFrequencyModeOn(val bool) (err error) {
 	reg, err := d.Read8(SX127X_REG_OP_MODE)
 	if err != nil {
 		return err
@@ -325,7 +352,7 @@ func (d *Dev) ReadConfig() (cfg lora.Config, continuousMode bool, err error) {
 	if err != nil {
 		return cfg, continuousMode, err
 	}
-	freq := uint64(buf[0]<<16) | uint64(buf[1]<<8) | uint64(buf[2])
+	freq := uint64(buf[0])<<16 | uint64(buf[1])<<8 | uint64(buf[2])
 	freq = (freq >> 19) * 320000
 	cfg.Freq = uint32(freq)
 	// freq := uint64(fHz<<19) / 32000000
@@ -335,8 +362,8 @@ func (d *Dev) ReadConfig() (cfg lora.Config, continuousMode bool, err error) {
 	return cfg, continuousMode, nil
 }
 
-// SetHeaderType set implicit or explicit mode.
-func (d *Dev) SetHeaderType(headerType uint8) error {
+// setHeaderType set implicit or explicit mode.
+func (d *Dev) setHeaderType(headerType uint8) error {
 	val, err := d.Read8(SX127X_REG_MODEM_CONFIG_1)
 	if err != nil {
 		return err
@@ -348,11 +375,11 @@ func (d *Dev) SetHeaderType(headerType uint8) error {
 	return d.Write8(SX127X_REG_MODEM_CONFIG_1, val)
 }
 
-// SetHopPeriod sets number of symbol periods between frequency hops. (0 = disabled).
-func (d *Dev) SetHopPeriod(val uint8) error { return d.Write8(SX127X_REG_HOP_PERIOD, val) }
+// setHopPeriod sets number of symbol periods between frequency hops. (0 = disabled).
+func (d *Dev) setHopPeriod(val uint8) error { return d.Write8(SX127X_REG_HOP_PERIOD, val) }
 
-// SetSpreadingFactor changes spreading factor.
-func (d *Dev) SetSpreadingFactor(sf uint8) error {
+// setSpreadingFactor changes spreading factor.
+func (d *Dev) setSpreadingFactor(sf uint8) error {
 	d.spreadF = sf
 	// Declare values for spread factor of 6.
 	var (
@@ -408,7 +435,7 @@ func (d *Dev) setTxPowerWithPaBoost(txPower int8, paBoost bool) (err error) {
 		if err != nil {
 			break
 		}
-		err = d.SetOCP(ocp)
+		err = d.setOCP(ocp)
 		if err != nil {
 			break
 		}
@@ -426,8 +453,8 @@ func (d *Dev) setTxPowerWithPaBoost(txPower int8, paBoost bool) (err error) {
 	return err
 }
 
-// SetOCP defines Overload Current Protection configuration
-func (d *Dev) SetOCP(mA uint8) error {
+// setOCP defines Overload Current Protection configuration.
+func (d *Dev) setOCP(mA uint8) error {
 	ocpTrim := uint8(27)
 	if mA < 45 {
 		mA = 45
@@ -440,21 +467,19 @@ func (d *Dev) SetOCP(mA uint8) error {
 	return d.Write8(SX127X_REG_OCP, 0x20|(0x1F&ocpTrim))
 }
 
-// SetPreambleLength defines number of preamble
-func (d *Dev) SetPreambleLength(pLen uint16) error {
+// setPreambleLength defines number of preamble
+func (d *Dev) setPreambleLength(pLen uint16) error {
 	var buf [2]byte
 	binary.BigEndian.PutUint16(buf[:], pLen)
 	return d.write(SX127X_REG_PREAMBLE_MSB, buf[:])
 }
 
-// IsTransmitting tests if a packet transmission is in progress.
-// If the SPI transaction fails then it returns false.
-func (d *Dev) IsTransmitting() bool {
+func (d *Dev) OpMode() OpMode {
 	val, err := d.Read8(SX127X_REG_OP_MODE)
 	if err != nil {
-		return false
+		return 255 // Out of band error.
 	}
-	return (val & SX127X_OPMODE_TX) == SX127X_OPMODE_TX
+	return OpMode(val & SX127X_OPMODE_MASK)
 }
 
 // LastPacketRSSI gives the RSSI of the last packet received. If SPI transaction fails this returns 0.
@@ -482,15 +507,15 @@ func (d *Dev) RandomU32() (rnd uint32, err error) {
 	if err != nil {
 		return 0, err
 	}
-	err = d.SetOpMode(SX127X_OPMODE_SLEEP)
+	err = d.SetOpMode(OpSleep)
 	if err != nil {
 		return 0, err
 	}
-	err = d.SetFrequency(d.prevFreq)
+	err = d.setFrequency(d.prevFreq)
 	if err != nil {
 		return 0, err
 	}
-	err = d.SetOpMode(SX127X_OPMODE_RX)
+	err = d.SetOpMode(OpRx)
 	if err != nil {
 		return 0, err
 	}
@@ -506,18 +531,23 @@ func (d *Dev) RandomU32() (rnd uint32, err error) {
 	return rnd, nil
 }
 func (d *Dev) clrLoRaIrq() error { return d.Write8(SX127X_REG_IRQ_FLAGS, 0xff) }
-func (d *Dev) sleep() error      { return d.Write8(SX127X_REG_OP_MODE, 0x08) }
-func (d *Dev) standby() error    { return d.Write8(SX127X_REG_OP_MODE, 0x09) }
-func (d *Dev) entryLoRa() error  { return d.Write8(SX127X_REG_OP_MODE, 0x88) }
 
-// SetOpMode changes the sx1276 mode
-func (d *Dev) SetOpMode(mode uint8) error {
+// func (d *Dev) sleep() error      { return d.Write8(SX127X_REG_OP_MODE, 0x08) }
+func (d *Dev) standby() error   { return d.Write8(SX127X_REG_OP_MODE, 0x09) }
+func (d *Dev) entryLoRa() error { return d.Write8(SX127X_REG_OP_MODE, 0x88) }
+
+// SetOpMode changes the sx1276 mode. This function can halt a receive or transmit operation.
+func (d *Dev) SetOpMode(mode OpMode) error {
 	cur, err := d.Read8(SX127X_REG_OP_MODE)
 	if err != nil {
 		return err
 	}
-	new := (cur & (^SX127X_OPMODE_MASK)) | mode
-	return d.Write8(SX127X_REG_OP_MODE, new)
+	new := (cur & (^SX127X_OPMODE_MASK)) | uint8(mode)
+	err = d.Write8(SX127X_REG_OP_MODE, new)
+	if mode == OpSleep && err == nil {
+		time.Sleep(15 * time.Millisecond) // Wait for wake.
+	}
+	return err
 }
 
 // Reset re-initialize the sx127x device
@@ -642,10 +672,10 @@ func (d *Dev) Read8(addr uint8) (uint8, error) {
 }
 
 func (d *Dev) r8(addr uint8) (uint8, error) {
-	var buf [3]byte
+	var buf [4]byte
 	buf[0] = addr & 0x7f
 	err := d.spi.Tx(buf[:2], buf[2:])
-	return buf[2], err
+	return buf[3], err
 }
 
 //go:inline
@@ -653,8 +683,15 @@ func (d *Dev) enable(b bool) {
 	d.nss.Set(!b)
 }
 
-func min[T ~int | ~uint8](a, b T) T {
+func min[T ~int | ~int64 | ~uint8](a, b T) T {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max[T ~int | ~int64 | ~uint8](a, b T) T {
+	if a > b {
 		return a
 	}
 	return b

@@ -84,8 +84,13 @@ const (
 	// Automatic gain control
 	SX127X_AGC_AUTO_OFF uint8 = 0x00
 	SX127X_AGC_AUTO_ON  uint8 = 0x01
-	// Operation modes
-	SX127X_OPMODE_LORA      uint8 = 0x80
+
+	SX127X_LORA_MAC_PUBLIC_SYNCWORD  = 0x34
+	SX127X_LORA_MAC_PRIVATE_SYNCWORD = 0x14
+)
+
+// Operation modes.
+const (
 	SX127X_OPMODE_MASK      uint8 = 0x07
 	SX127X_OPMODE_SLEEP     uint8 = 0x00
 	SX127X_OPMODE_STANDBY   uint8 = 0x01
@@ -95,7 +100,22 @@ const (
 	SX127X_OPMODE_RX        uint8 = 0x05
 	SX127X_OPMODE_RX_SINGLE uint8 = 0x06
 	SX127X_OPMODE_CAD       uint8 = 0x07
+	SX127X_OPMODE_LORA      uint8 = 0x80
+)
 
-	SX127X_LORA_MAC_PUBLIC_SYNCWORD  = 0x34
-	SX127X_LORA_MAC_PRIVATE_SYNCWORD = 0x14
+// OpMode represents the available operation modes of the SX127x devices.
+type OpMode uint8
+
+// Operation modes.
+const (
+	// Sleep mode will sleep goroutine for 15ms on SetOpmode call.
+	OpSleep OpMode = iota
+	// Standby mode is the default mode when waiting to operate.
+	OpStandby
+	OpFSTx
+	OpTx
+	OpFSRx
+	OpRx
+	OpRxSingle
+	OpCAD
 )

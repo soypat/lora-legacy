@@ -1,6 +1,9 @@
 package lora
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Config holds the LoRa configuration parameters.
 type Config struct {
@@ -15,6 +18,32 @@ type Config struct {
 	CRC            uint8  // CRC : Yes/No
 	IQ             uint8  // iq : Standard/inverted
 	LoraTxPowerDBm int8   // Tx power in Dbm
+}
+
+func (cfg *Config) TimeOnAir(payloadLength int) time.Duration {
+	crc := int64(max(cfg.CRC, 1))
+	ih := int64(max(cfg.HeaderType, 1))
+	ldr := int64(max(cfg.LDR, 1))
+	cr := int64(cfg.CodingRate)
+	spread := int64(cfg.Spread)
+	// Page 31 SX1276IMLTRT SEMTECH | Alldatasheet.
+	Npayload := 8*int64(payloadLength) - 4*spread + 28 + 16*crc - 20*ih
+	div := 4 * (spread - 2*ldr)
+	// Apply Ceil and max with minimal branching.
+	if Npayload < 0 || div <= 0 {
+		Npayload = 0
+	} else if Npayload%div == 0 {
+		Npayload /= div
+		Npayload *= (cr + 4)
+	} else {
+		Npayload /= div
+		Npayload++
+		Npayload *= (cr + 4)
+	}
+	Npayload += 8 + int64(cfg.PreambleLength) + 5 // Says 4.25 in manual but we round up.
+	// Calculate LoRa Transmission Parameter Relationship page 28.
+	Ts_us := 1000_000 * (int64(1) << cfg.Spread) / int64(BandwidthToHertz(cfg.Bandwidth))
+	return time.Microsecond * (time.Duration(Npayload * Ts_us))
 }
 
 var (
@@ -59,6 +88,34 @@ const (
 	IQInverted = 0x01 //  7     0                    inverted
 )
 
+func BandwidthToHertz(bw uint8) (BW int) {
+	switch bw {
+	case Bandwidth7_8:
+		BW = 7.8e3
+	case Bandwidth10_4:
+		BW = 10.4e3
+	case Bandwidth15_6:
+		BW = 15.6e3
+	case Bandwidth20_8:
+		BW = 20.8e3
+	case Bandwidth31_25:
+		BW = 31.25e3
+	case Bandwidth41_7:
+		BW = 41.7e3
+	case Bandwidth62_5:
+		BW = 62.5e3
+	case Bandwidth125_0:
+		BW = 125e3
+	case Bandwidth250_0:
+		BW = 250e3
+	case Bandwidth500_0:
+		BW = 500e3
+	default:
+		BW = -1
+	}
+	return BW
+}
+
 const (
 	Bandwidth7_8   = iota // 7.8 kHz
 	Bandwidth10_4         // 10.4 kHz
@@ -84,42 +141,55 @@ const (
 	MHz923_3 = 923300000
 )
 
+func max[T ~int | ~int64 | ~uint8](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+/*
 const (
+
 	RadioEventRxDone = iota
 	RadioEventTxDone
 	RadioEventTimeout
 	RadioEventWatchdog
 	RadioEventCrcError
 	RadioEventUnhandled
+
 )
 
 // RadioEvent are used for communicating in the radio Event Channel
-type RadioEvent struct {
-	EventType int
-	IRQStatus uint16
-	EventData []byte
-}
+
+	type RadioEvent struct {
+		EventType int
+		IRQStatus uint16
+		EventData []byte
+	}
 
 // NewRadioEvent() returns a new RadioEvent that can be used in the RadioChannel
-func NewRadioEvent(eType int, irqStatus uint16, eData []byte) RadioEvent {
-	r := RadioEvent{EventType: eType, IRQStatus: irqStatus, EventData: eData}
-	return r
-}
 
-type Radio interface {
-	Reset()
-	Tx(pkt []uint8, timeoutMs uint32) error
-	Rx(timeoutMs uint32) ([]uint8, error)
-	SetFrequency(freq uint32)
-	SetIqMode(mode uint8)
-	SetCodingRate(cr uint8)
-	SetBandwidth(bw uint8)
-	SetCrc(enable bool)
-	SetSpreadingFactor(sf uint8)
-	SetPreambleLength(plen uint16)
-	SetTxPower(txpow int8)
-	SetSyncWord(syncWord uint16)
-	SetPublicNetwork(enable bool)
-	SetHeaderType(headerType uint8)
-	LoraConfig(cnf Config)
-}
+	func NewRadioEvent(eType int, irqStatus uint16, eData []byte) RadioEvent {
+		r := RadioEvent{EventType: eType, IRQStatus: irqStatus, EventData: eData}
+		return r
+	}
+
+	type Radio interface {
+		Reset()
+		Tx(pkt []uint8, timeoutMs uint32) error
+		Rx(timeoutMs uint32) ([]uint8, error)
+		SetFrequency(freq uint32)
+		SetIqMode(mode uint8)
+		SetCodingRate(cr uint8)
+		SetBandwidth(bw uint8)
+		SetCrc(enable bool)
+		SetSpreadingFactor(sf uint8)
+		SetPreambleLength(plen uint16)
+		SetTxPower(txpow int8)
+		SetSyncWord(syncWord uint16)
+		SetPublicNetwork(enable bool)
+		SetHeaderType(headerType uint8)
+		LoraConfig(cnf Config)
+	}
+*/

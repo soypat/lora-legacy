@@ -388,7 +388,7 @@ func (d *Device) Tx(pkt []uint8, timeoutMs uint32) error {
 	d.SetAgcAuto(SX127X_AGC_AUTO_ON)
 
 	// set the IRQ mapping DIO0=TxDone DIO1=NOP DIO2=NOP
-	err = d.Set
+
 	d.WriteRegister(SX127X_REG_DIO_MAPPING_1, SX127X_MAP_DIO0_LORA_TXDONE|SX127X_MAP_DIO1_LORA_NOP|SX127X_MAP_DIO2_LORA_NOP)
 	// Clear all radio IRQ Flags
 	d.WriteRegister(SX127X_REG_IRQ_FLAGS, 0xFF)
@@ -568,7 +568,7 @@ func (d *Device) SetRadioController(rc RadioController) error {
 	if err := d.controller.Init(); err != nil {
 		return err
 	}
-	d.controller.SetupInterrupts(d.HandleInterrupt)
+	// d.controller.SetupInterrupts(d.HandleInterrupt)
 
 	return nil
 }
