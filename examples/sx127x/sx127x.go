@@ -4,7 +4,9 @@ package main
 // You need to connect SPI, RST, CS, DIO0 (aka IRQ) and DIO1 to use.
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"machine"
 	"time"
 
@@ -31,10 +33,12 @@ var (
 	SX127X_PIN_TX  = machine.GP3
 	SX127X_PIN_RX  = machine.GP4
 	SX127X_PIN_CS  = machine.GP5
+	LED            = machine.LED
 	loraConf, _, _ = lora.CountryConfig("ar", false)
 )
 
 func main() {
+	// LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	time.Sleep(3 * time.Second)
 	println("\n# TinyGo Lora RX/TX test")
 	println("# ----------------------")
@@ -42,7 +46,7 @@ func main() {
 	SX127X_PIN_RST.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	SX127X_PIN_CS.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	err := SX127X_SPI.Configure(machine.SPIConfig{
-		Frequency: 500000,
+		Frequency: 100000,
 		Mode:      0,
 		SCK:       SX127X_PIN_SCK,
 		SDO:       SX127X_PIN_TX,
@@ -60,11 +64,12 @@ func main() {
 		panic(err.Error())
 	}
 	println("main: sx127x found")
+	loraConf.Freq = lora.MHz433_0
 	cfg, cont, err := dev.ReadConfig()
 
 	// Prepare for Lora Operation
 
-	fmt.Println("time on air 10:", loraConf.TimeOnAir(10), " ToA255:", loraConf.TimeOnAir(255))
+	fmt.Println("time on air 10:", loraConf.TimeOnAir(10), " To 255:", loraConf.TimeOnAir(255))
 	fmt.Printf("%v\n%+v err=%v\n\nwant=%+v\n", cont, cfg, err, loraConf)
 
 	err = dev.Init(loraConf)
@@ -74,45 +79,55 @@ func main() {
 	println("loRa init success")
 	cfg, cont, err = dev.ReadConfig()
 	fmt.Printf("%v\n%+v err=%v\n\nwant=%+v\n", cont, cfg, err, loraConf)
-	txBuf := []byte("Hello LoRa!")
+	myName, err := dev.RandomU32()
+	if err != nil {
+		println("random get fail:" + err.Error())
+	}
+	me := byte('A' + uint8(myName)%26)
+	txBuf := append([]byte("Hello from "), me)
+	println("I am ", string(me))
 	delay := loraConf.TimeOnAir(len(txBuf))
-	delayStr := delay.String()
+	println("tx delay:", delay.String())
+	cycle := true
 	for {
+		// LED.Set(cycle)
+		cycle = !cycle
 		for dev.CheckConnection() != nil {
 			println("check SPI connection!")
 			time.Sleep(time.Second)
 		}
-		println("listening...")
+		print(" listening")
 		err := dev.ListenAndDo(doRx5Seconds)
 		if err != nil {
 			println("listen error:", err.Error())
 		}
-		println("transmitting packet")
+		print(" transmitting")
 		err = dev.TxPacket(txBuf)
 		if err != nil {
 			println("transmit error:", err.Error())
 		}
-
-		println("waiting for transmission end for ", delayStr)
 		time.Sleep(delay)
 		err = dev.SetOpMode(sx127x.OpStandby)
 		if err != nil {
 			println("transmit error:", err.Error())
 		}
-		println("finished Tx, now wait before loop")
 		time.Sleep(time.Second)
 	}
 }
 
 func doRx5Seconds(d *sx127x.Dev) {
-	var buf [64]byte
+	var buf [255]byte
 	for i := 0; i < 5; i++ {
 		time.Sleep(time.Second)
-		n, err := d.RxPacket(buf[:])
+		n, err := d.ParsePacket(buf[:])
 		if n > 0 {
 			println("got packet ", string(buf[:n]))
 		} else {
-			println("Rx error:", err.Error())
+			if errors.Is(err, io.EOF) {
+				print(".")
+			} else {
+				println("Rx error:", err.Error())
+			}
 		}
 	}
 }

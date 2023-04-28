@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"machine"
+	"runtime"
 	"time"
 
 	"github.com/soypat/lora"
@@ -33,8 +34,103 @@ func NewDev(spi drivers.SPI, nssOrCS, reset machine.Pin) *Dev {
 	return d
 }
 
-// Init calls device initialization functions without resetting it.
 func (d *Dev) Init(cfg lora.Config) (err error) {
+	d.Reset()
+	err = d.CheckConnection()
+	if err != nil {
+		return err
+	}
+	err = d.sleep()
+	if err != nil {
+		return err
+	}
+	err = d.setFrequency(cfg.Freq)
+	if err != nil {
+		return err
+	}
+
+	// Set Base addresses.
+	d.Write8(SX127X_REG_FIFO_TX_BASE_ADDR, 0)
+	d.Write8(SX127X_REG_FIFO_ADDR_PTR, 0)
+	// Set Low noise amplifier to max gain setting.
+	err = d.Write8(SX127X_REG_LNA, SX127X_LNA_MAX_GAIN)
+	if err != nil {
+		return err
+	}
+	err = d.setHeaderType(cfg.HeaderType)
+	if err != nil {
+		return err
+	}
+	err = d.setAutoAGC(SX127X_AGC_AUTO_ON)
+	if err != nil {
+		return err
+	}
+	err = d.setTxPower(17)
+	if err != nil {
+		return err
+	}
+	// Set to standby
+	return d.idle()
+}
+
+func (d *Dev) sleep() error { return d.SetOpMode(opLoRaBit | OpSleep) }
+func (d *Dev) idle() error  { return d.SetOpMode(opLoRaBit | OpStandby) }
+
+func (d *Dev) TxPacket(packet []byte) (err error) {
+	if len(packet) > 255 {
+		return errors.New("packet too large to broadcast")
+	}
+	err = d.idle()
+	if err != nil {
+		return err
+	}
+	d.Write8(SX127X_REG_FIFO_ADDR_PTR, 0)
+	d.Write8(SX127X_REG_PAYLOAD_LENGTH, 0)
+
+	// Begin writing data.
+	currentLength, err := d.Read8(SX127X_REG_PAYLOAD_LENGTH)
+	if err != nil {
+		return err
+	}
+	if currentLength != 0 {
+		return errors.New("payload length not set to zero")
+	}
+	for i := 0; i < len(packet); i++ {
+		err := d.Write8(SX127X_REG_FIFO, packet[i])
+		if err != nil {
+			return err
+		}
+	}
+	err = d.Write8(SX127X_REG_PAYLOAD_LENGTH, uint8(len(packet)))
+	if err != nil {
+		return err
+	}
+
+	err = d.SetOpMode(opLoRaBit | OpTx)
+	startTx := time.Now()
+	if err != nil {
+		return err
+	}
+	counts := 0
+	var reg uint8
+	for {
+		counts++
+		reg, err = d.Read8(SX127X_REG_IRQ_FLAGS)
+		if reg&SX127X_IRQ_LORA_TXDONE_MASK != 0 || err != nil {
+			if err != nil {
+				return err
+			}
+			break
+		}
+		runtime.Gosched() // Yield to scheduler.
+	}
+	println("tx done in:", time.Since(startTx).String(), counts)
+	d.idle()
+	return d.Write8(SX127X_REG_IRQ_FLAGS, SX127X_IRQ_LORA_TXDONE_MASK)
+}
+
+// Init calls device initialization functions without resetting it.
+func (d *Dev) _init_MUSTFIX(cfg lora.Config) (err error) {
 	cfg.LoraTxPowerDBm = min(cfg.LoraTxPowerDBm, 20) // Set Max to 20dBm.
 	err = d.SetOpMode(OpSleep)
 	if err != nil {
@@ -119,61 +215,56 @@ func (d *Dev) Init(cfg lora.Config) (err error) {
 	return err
 }
 
-func TimeOnAir(cfg lora.Config, packetLength uint8) time.Duration {
-	crc := int64(max(cfg.CRC, 1))
-	ih := int64(max(cfg.HeaderType, 1))
-	ldr := int64(max(cfg.LDR, 1))
-	cr := int64(cfg.CodingRate)
-	spread := int64(cfg.Spread)
-	// Page 31 SX1276IMLTRT SEMTECH | Alldatasheet.
-	Npayload := 8*int64(packetLength) - 4*spread + 28 + 16*crc - 20*ih
-	div := 4 * (spread - 2*ldr)
-	// Apply Ceil and max with minimal branching.
-	if Npayload < 0 || div <= 0 {
-		Npayload = 0
-	} else if Npayload%div == 0 {
-		Npayload /= div
-		Npayload *= (cr + 4)
-	} else {
-		Npayload /= div
-		Npayload++
-		Npayload *= (cr + 4)
+func (d *Dev) ParsePacket(buf []byte) (uint8, error) {
+	if len(buf) < 255 {
+		return 0, errors.New("please pass in a 255 or larger sized buffer")
 	}
-	Npayload += 8 + int64(cfg.PreambleLength) + 5 // Says 4.25 in manual but we round up.
-	// Calculate LoRa Transmission Parameter Relationship page 28.
-	Ts_us := 1000_000 * (int64(1) << cfg.Spread) / int64(lora.BandwidthToHertz(cfg.Bandwidth))
-	return time.Microsecond * (time.Duration(Npayload * Ts_us))
-}
+	startOpmode := d.OpMode()
 
-func (d *Dev) TxPacket(pkt []byte) (err error) {
-	switch {
-	case len(pkt) > 255:
-		return errors.New("packet too large to transmit. limit is 255")
-	case d.OpMode() == OpTx:
-		return errors.New("is currently transmitting packet")
+	cfg, _, _ := d.ReadConfig()
+	if cfg.HeaderType == lora.HeaderImplicit {
+		return 0, errors.New("implicit header not implemented")
+		// d.Write8(SX127X_REG_PAYLOAD_LENGTH)
 	}
-
+	irqflags, err := d.Read8(SX127X_REG_IRQ_FLAGS)
+	if err != nil {
+		return 0, err
+	}
 	err = d.clrLoRaIrq()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	// initialize the payload size and address pointers
-	d.Write8(SX127X_REG_PAYLOAD_LENGTH, uint8(len(pkt)))
-	d.Write8(SX127X_REG_FIFO_TX_BASE_ADDR, 0)
-	d.Write8(SX127X_REG_FIFO_ADDR_PTR, 0)
-	// err = d.write(SX127X_REG_FIFO, pkt) // Does not work.
-	for _, b := range pkt {
-		err = d.Write8(SX127X_REG_FIFO, b)
+	if irqflags&SX127X_IRQ_LORA_RXDONE_MASK != 0 {
+		return 0, errors.New("no packet in fifo")
+	}
+	if irqflags&SX127X_IRQ_LORA_CRCERR_MASK == 0 {
+		return 0, errors.New("crc error")
+	}
+	// Succesfully received packet.
+	plen, err := d.Read8(SX127X_REG_RX_NB_BYTES) // For EXPLICIT header mode.
+	if err != nil {
+		return 0, err
+	}
+	curraddr, err := d.Read8(SX127X_REG_FIFO_RX_CURRENT_ADDR)
+	if err != nil {
+		return 0, err
+	}
+	err = d.Write8(SX127X_REG_FIFO_ADDR_PTR, curraddr)
+	if err != nil {
+		return 0, err
+	}
+	d.idle() // Ready to read. TODO(soypat): Move this before Reading lengths to prevent packet read during initial processing.
+	time.Sleep(20 * time.Millisecond)
+	for i := uint8(0); i < plen; i++ {
+		buf[i], err = d.Read8(SX127X_REG_FIFO)
 		if err != nil {
-			return err
+			return i, err
 		}
 	}
-
-	err = d.SetOpMode(OpTx)
-	if err != nil {
-		return err
+	if startOpmode == OpRx || startOpmode == OpRxSingle {
+		d.SetOpMode(opLoRaBit | startOpmode) // Revert to previous opmode.
 	}
-	return nil
+	return plen, nil
 }
 
 func (d *Dev) RxPacket(buf []byte) (int, error) {
@@ -208,8 +299,6 @@ func (d *Dev) RxPacket(buf []byte) (int, error) {
 	return n, err
 	// Single RX mode don't properly handle Timeouts on sx127x, so we use Continuous RX
 	// Go routine is a workaround to stop the Continuous RX and fire a timeout Event
-
-	return 0, nil
 }
 
 // Listen listens for Rx activity on the LoRa network. Do not call other functions
@@ -287,12 +376,9 @@ func (d *Dev) setFrequency(freq uint32) error {
 	freqReg[0] = byte(f64 >> 16)
 	freqReg[1] = byte(f64 >> 8)
 	freqReg[2] = byte(f64 >> 0)
-	println("setF", freqReg[0], freqReg[1], freqReg[2], freq, f64)
 	d.Write8(SX127X_REG_FRF_MSB, freqReg[0])
 	d.Write8(SX127X_REG_FRF_MID, freqReg[1])
 	return d.Write8(SX127X_REG_FRF_LSB, freqReg[2])
-	//
-	// return d.write(SX127X_REG_FRF_MSB, freqReg[:])
 }
 
 // setBandwidth updates the bandwidth the LoRa module is using
@@ -541,7 +627,11 @@ func (d *Dev) RandomU32() (rnd uint32, err error) {
 	}
 	return rnd, nil
 }
-func (d *Dev) clrLoRaIrq() error { return d.Write8(SX127X_REG_IRQ_FLAGS, 0xff) }
+
+func (d *Dev) clrLoRaIrq() error {
+	flags, _ := d.Read8(SX127X_REG_IRQ_FLAGS)
+	return d.Write8(SX127X_REG_IRQ_FLAGS, flags)
+}
 
 // func (d *Dev) sleep() error      { return d.Write8(SX127X_REG_OP_MODE, 0x08) }
 func (d *Dev) standby() error   { return d.Write8(SX127X_REG_OP_MODE, 0x09) }
@@ -553,7 +643,7 @@ func (d *Dev) SetOpMode(mode OpMode) error {
 	if err != nil {
 		return err
 	}
-	new := (cur & (^SX127X_OPMODE_MASK)) | uint8(mode)
+	new := (cur & (^SX127X_OPMODE_MASK)) | uint8(mode) | uint8(opLoRaBit)
 	err = d.Write8(SX127X_REG_OP_MODE, new)
 	if mode == OpSleep && err == nil {
 		time.Sleep(15 * time.Millisecond) // Wait for wake.
@@ -564,10 +654,12 @@ func (d *Dev) SetOpMode(mode OpMode) error {
 // Reset re-initialize the sx127x device
 func (d *Dev) Reset() {
 	d.rst.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	d.rst.Low()
-	time.Sleep(100 * time.Millisecond)
 	d.rst.High()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	d.rst.Low()
+	time.Sleep(200 * time.Millisecond)
+	d.rst.High()
+	time.Sleep(50 * time.Millisecond)
 }
 
 var ErrInvalidID = errors.New("sx1278: invalid device id or faulty SPI connection")

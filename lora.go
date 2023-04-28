@@ -135,6 +135,8 @@ const (
 )
 
 const (
+	MHz433_0 = 433050000 // Medical, scientific and industrial band.
+	MHz434_8 = 434790000 // Medical, scientific and industrial band.
 	MHz868_1 = 868100000
 	MHz868_5 = 868500000
 	MHz916_8 = 916800000

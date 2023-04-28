@@ -118,4 +118,30 @@ const (
 	OpRx
 	OpRxSingle
 	OpCAD
+	opLoRaBit = OpMode(SX127X_OPMODE_LORA)
 )
+
+func (op OpMode) String() (s string) {
+	op = op &^ opLoRaBit
+	switch op {
+	case OpSleep:
+		s = "sleep"
+	case OpStandby:
+		s = "standby"
+	case OpFSTx:
+		s = "fstx"
+	case OpTx:
+		s = "tx"
+	case OpFSRx:
+		s = "fsrx"
+	case OpRx:
+		s = "rx"
+	case OpRxSingle:
+		s = "rx-single"
+	case OpCAD:
+		s = "cad"
+	default:
+		s = "unknown"
+	}
+	return s
+}

@@ -30,6 +30,8 @@ var (
 	SX127X_PIN_TX  = machine.GP3
 	SX127X_PIN_RX  = machine.GP4
 	SX127X_PIN_CS  = machine.GP5
+
+	LED = machine.LED
 )
 
 func dioIrqHandler(machine.Pin) {
@@ -37,6 +39,7 @@ func dioIrqHandler(machine.Pin) {
 }
 
 func main() {
+	LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	time.Sleep(5 * time.Second)
 	println("\n# TinyGo Lora RX/TX test")
 	println("# ----------------------")
